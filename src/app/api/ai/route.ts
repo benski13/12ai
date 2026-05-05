@@ -1,9 +1,9 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
 const SYSTEM_PROMPT = `Tu es un coach stratégique brutalement honnête, rationnel et orienté performance.
@@ -77,40 +77,76 @@ Pas de compliments inutiles. Sois comme un mentor qui veut vraiment les résulta
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { error: "OPENAI_API_KEY missing" },
+        { status: 500 }
+      );
+    }
 
     const { prompt, mode, context } = await request.json();
-    if (!prompt && !mode) return NextResponse.json({ error: "prompt or mode required" }, { status: 400 });
 
-    // Build the full prompt
+    if (!prompt && !mode) {
+      return NextResponse.json(
+        { error: "prompt or mode required" },
+        { status: 400 }
+      );
+    }
+
     const modeInstructions = mode ? MODE_PROMPTS[mode] || "" : "";
-    const contextStr = context ? `\n\n=== DONNÉES UTILISATEUR ===\n${JSON.stringify(context, null, 2)}\n=== FIN DONNÉES ===\n\n` : "";
-    const fullPrompt = contextStr + (modeInstructions ? `${modeInstructions}\n\n` : "") + (prompt || "Analyse la situation globale.");
 
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1500,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: fullPrompt }],
+    const contextStr = context
+      ? `\n\n=== DONNÉES UTILISATEUR ===\n${JSON.stringify(
+          context,
+          null,
+          2
+        )}\n=== FIN DONNÉES ===\n\n`
+      : "";
+
+    const fullPrompt =
+      contextStr +
+      (modeInstructions ? `${modeInstructions}\n\n` : "") +
+      (prompt || "Analyse la situation globale.");
+
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      instructions: SYSTEM_PROMPT,
+      input: fullPrompt,
+      max_output_tokens: 1500,
     });
 
-    const responseText = message.content[0].type === "text" ? message.content[0].text : "";
+    const responseText = response.output_text || "";
 
-    // Log AI usage (non-blocking)
-    supabase.from("ai_logs").insert({
-      user_id: user.id,
-      module: mode || "custom",
-      mode,
-      prompt_preview: (prompt || fullPrompt).slice(0, 200),
-      response_preview: responseText.slice(0, 200),
-      tokens_used: message.usage.input_tokens + message.usage.output_tokens,
-    }).then(() => {});
+    supabase
+      .from("ai_logs")
+      .insert({
+        user_id: user.id,
+        module: mode || "custom",
+        mode,
+        prompt_preview: (prompt || fullPrompt).slice(0, 200),
+        response_preview: responseText.slice(0, 200),
+        tokens_used: response.usage
+          ? response.usage.input_tokens + response.usage.output_tokens
+          : null,
+      })
+      .then(() => {});
 
     return NextResponse.json({ text: responseText });
   } catch (error: unknown) {
     console.error("AI route error:", error);
-    const message = error instanceof Error ? error.message : "AI service error";
+
+    const message =
+      error instanceof Error ? error.message : "AI service error";
+
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
